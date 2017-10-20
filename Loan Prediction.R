@@ -2,6 +2,7 @@ library('caret')
 library('nnet')
 library('e1071')
 library('plyr')
+library('randomForest')
 library('gtools')
 
 #Load the datasets
@@ -33,63 +34,83 @@ for (i in names(data)){
   }
 }
 
-
-
-dummy <- dummyVars(~., data = data, fullRank = T)
-data <- data.frame(predict(dummy,data))
-
-
-
-col_names <- sapply(data, function(col) length(unique(col)) < 10)
-data[ , col_names] <- lapply(data[ , col_names] , factor)
-
-
-
 train_modified <- data[1:nrow(train),]
+train_modified <- predict(preProcess(train_modified,
+                    method = c('medianImpute')),train_modified)
+
+#boruta_model <- Boruta(Loan_Status ~., train_modified)
+#final.model <- TentativeRoughFix(boruta_model)
+#variables <- getSelectedAttributes(final.model, withTentative = F)
+#train_modified <- cbind(train_modified, Loan_Status)
+
+
 test_modified <-data[(nrow(train)+1):nrow(data),]
+
+
+dummy_train <- dummyVars(~., data = train_modified, fullRank = T)
+train_dummy <- data.frame(predict(dummy_train,train_modified))
+
+dummy_test <- dummyVars(~., data = test_modified, fullRank = T)
+test_dummy <- data.frame(predict(dummy_test,test_modified))
+
+
+col_names <- sapply(train_dummy, function(col) length(unique(col)) < 10)
+train_dummy[ , col_names] <- lapply(train_dummy[ , col_names] , factor)
+
+col_names <- sapply(test_dummy, function(col) length(unique(col)) < 10)
+test_dummy[ , col_names] <- lapply(test_dummy[ , col_names] , factor)
 
 
 
 #Replace missing values and Normalize continuous variables
-train_norm <- predict(preProcess(train_modified,method= c("medianImpute","range")),train_modified)
-test_norm <- predict(preProcess(test_modified,method = c("medianImpute","range")),test_modified)
+train_norm <- predict(preProcess(train_dummy,method= c("medianImpute","range")),train_dummy)
+test_norm <- predict(preProcess(test_dummy,method = c("medianImpute","range")),test_dummy)
 
+
+#Based on Boruta Feature Selection
+variables_added <- c('ApplicantIncome','CoapplicantIncome','LoanAmount','Credit_History.1', 'Credit_History.Unknown',
+                     'Property_Area.Semiurban','Property_Area.Urban')
+
+train_norm <- train_norm[,which (names(train_norm) %in% c(variables_added))]
 train_norm <- cbind(train_norm, Loan_Status)
 
-train_norm <- train_norm[,-which(names(train_norm) %in% c('Married.Unknown', 
-              'Loan_Amount_Term.12', 'Loan_Amount_Term.12','Loan_Amount_Term.36',
-              'Loan_Amount_Term.60','Loan_Amount_Term.84','Loan_Amount_Term.120',
-              'Loan_Amount_Term.240','Loan_Amount_Term.300','Loan_Amount_Term.350',
-              'Loan_Amount_Term.480','Loan_Amount_Term.Unknown'))]
+test_norm <- test_norm[, which (names(test_norm) %in% c(variables_added))]
 
-test_norm <- test_norm[,-which(names(test_norm) %in% c('Married.Unknown', 
-              'Loan_Amount_Term.12', 'Loan_Amount_Term.12','Loan_Amount_Term.36',
-              'Loan_Amount_Term.60','Loan_Amount_Term.84','Loan_Amount_Term.120',
-              'Loan_Amount_Term.240','Loan_Amount_Term.300','Loan_Amount_Term.350',
-              'Loan_Amount_Term.480','Loan_Amount_Term.Unknown'))]
-                                 
-
-              
 
 #Data Partition of train into train and validation
-rows <- sample(nrow(train_norm),floor(nrow(train_norm)*0.70))
+rows <- sample(nrow(train_norm),floor(nrow(train_norm)*0.80))
 train_norm_train <- train_norm[rows,]
 train_norm_valid <- train_norm[-rows,]
 
 
 
 #Enlist Models
-models <- c('SVM','Logistic Regression')
+models <- c('SVM','Logistic Regression', 'Random Forest')
 
 modelForm <- function (train_norm_train,model_name){
 
   if (model_name == 'Logistic Regression')
-    model <- glm(Loan_Status ~., train_norm_train, family = 'binomial')
-
+    model <- train(Loan_Status ~., train_norm, method = 'glm', 
+                   family = 'binomial',
+                   trControl = trainControl(
+                     method = "cv", number = 10,
+                     verboseIter = FALSE
+                   ))
+  
   else if (model_name == 'SVM')
-    model <- svm(Loan_Status ~ ., train_norm_train, type = 'nu-classification',
-                 kernel = 'radial')
-
+    model <- train(Loan_Status ~., train_norm, method = 'svmRadial',
+                   trControl = trainControl(
+                     method = "cv", number = 10,
+                     verboseIter = FALSE
+                   ))
+  
+  else if (model_name == 'Random Forest')
+    model <- train(Loan_Status ~., train_norm, method = 'rf',
+                   trControl = trainControl(
+                     method = "cv", number = 10,
+                     verboseIter = FALSE
+                   ))
+  
   return(model)
 
 }
@@ -111,14 +132,13 @@ prediction <- function(model,train_norm_valid,model_name){
 #Create Models, make predictions on validation dataset and display confusion matrix
 for (model_name in models){
   model <- modelForm(train_norm_train,model_name)
-  predicted <- prediction(model,train_norm_valid,model_name)
-  cm <- confusionMatrix(predicted,train_norm_valid$Loan_Status)
   print(paste("Accuracy for", model_name))
-  print (as.matrix(cm$overall['Accuracy']))
+  print (confusionMatrix(model,'average'))
 
-  predicted_test<- prediction(model,test_norm,model_name)
-  result <- cbind(result,'Loan_Status'= predicted_test)
+  #predicted_test<- prediction(model,test_norm,model_name)
+  #result <- cbind(result,'Loan_Status'= predicted_test)
 }
 
-write.csv(result[,c(1:2)], file = 'Submission_SVM.csv',row.names = FALSE)
-write.csv(result[,c(1,3)], file = 'Submission_Logistic_Regression.csv',row.names = FALSE)
+#write.csv(result[,c(1:2)], file = 'Submission_SVM.csv',row.names = FALSE)
+#write.csv(result[,c(1,3)], file = 'Submission_Logistic_Regression.csv',row.names = FALSE)
+#write.csv(result[,c(1,4)], file = 'Submission_Random_Forest.csv',row.names = FALSE)
